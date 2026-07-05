@@ -11,6 +11,13 @@ from flask import Flask, jsonify, redirect, render_template, request
 from rapidfuzz import fuzz
 from transformers import AutoModelForSpeechSeq2Seq, AutoModelForSeq2SeqLM, AutoTokenizer
 from werkzeug.utils import secure_filename
+from bangla_audio import (
+    detect_yes_no,
+    needs_confirmation,
+    get_confirm_command,
+    get_do_command,
+    get_cancel_command,
+)
 
 # ------------------------------------------------------------
 # Basic configuration
@@ -52,6 +59,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 ASR_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 NLLB_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 robot_connected = False
+pending_command = None
 
 
 def load_models():
@@ -187,9 +195,27 @@ def detect_command(text):
         "hello": ["হ্যালো", "হেলো", "সালাম", "hello", "hi", "hey"],
         "name": ["নাম", "তোমার নাম", "আপনার নাম", "name"],
         "walk_forward": ["সামনে যাও", "সামনে", "আগে যাও", "forward", "go forward"],
+        "go_back": [
+    "পিছনে যাও",
+    "পেছনে যাও",
+    "পিছনে যাও",
+    "ব্যাক",
+    "পিছনে",
+    "go back",
+    "backward",
+    "move back"
+],
+
+"salute": [
+    "স্যালুট",
+    "স্যালুট দাও",
+    "স্যালুট করো",
+    "salute"
+],
         "turn_left": ["বামে ঘুরো", "বাম দিকে", "left"],
-        "turn_right": ["ডানে ঘুরো", "দাঁড়াও", "right"],
+        "turn_right": ["ডানে ঘুরো", "ডান দিকে", "right"],
         "right_hand": ["হাত নাড়াও", "ডান হাত", "right hand", "wave"],
+        "left_hand": ["বাম হাত","বাম হাত নাড়াও","বাম হাত নাড়াও","left hand","wave left hand"],
         "rest": ["ঘুমাও", "রেস্ট", "rest", "sleep"],
     }
 
@@ -280,13 +306,49 @@ def process_audio():
         audio_file.save(save_path)
         bangla_text = transcribe_audio(save_path)
         english_text = translate_bangla_to_english(bangla_text)
+
+
+        global pending_command
+
         command = detect_command(bangla_text)
 
-        if command == "unknown":
-            robot_status = "unknown command"
+        # If NAO is waiting for yes/no answer
+        if pending_command is not None:
+            answer = detect_yes_no(bangla_text)
+
+            if answer == "yes":
+                nao_command = get_do_command(pending_command)
+                send_to_nao(nao_command)
+                robot_status = "confirmed and executed"
+                command = nao_command
+                pending_command = None
+
+            elif answer == "no":
+                nao_command = get_cancel_command(pending_command)
+                send_to_nao(nao_command)
+                robot_status = "cancelled"
+                command = nao_command
+                pending_command = None
+
+            else:
+                send_to_nao("unknown")
+                robot_status = "confirmation not understood"
+
+        # Normal command detection
         else:
-            send_to_nao(command)
-            robot_status = "sent"
+            if command == "unknown":
+                send_to_nao("unknown")
+                robot_status = "unknown command"
+
+            elif needs_confirmation(command):
+                pending_command = command
+                confirm_command = get_confirm_command(command)
+                send_to_nao(confirm_command)
+                robot_status = "waiting for confirmation"
+
+            else:
+                send_to_nao(command)
+                robot_status = "sent"
 
         return jsonify(
             {
